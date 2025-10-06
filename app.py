@@ -358,17 +358,45 @@ def get_reply():
     reply, source = None, None
 
     try:
-        # Step 0: Vague follow-up first (e.g., "tell me more")
-        if any(v in user_text.lower() for v in vague_queries) and memory["college_info"]:
-            context = format_college_info(memory["college_info"])
-            prompt = (
-                f"Based on the following official dataset information, generate a friendly, detailed, and accurate explanation about {memory['college_name']}.\n\n"
-                f"{context}\n\n"
-                f"Use only the information provided. Keep it conversational and helpful."
-            )
-            log_ollama_prompt(prompt, PRIMARY_MODEL, "ollama-dataset-memory")
+        # Step 0: Follow-up or expansion (“tell me more”, “generate more info”, etc.)
+        if any(v in user_text.lower() for v in vague_queries):
+            target_name = memory.get("college_name")
+            college_info = None
+
+            # 1️⃣ Try fuzzy match in dataset if memory empty
+            if not target_name:
+                from difflib import get_close_matches
+                possible_names = [c["name"].lower() for c in COLLEGES]
+                match = get_close_matches(user_text.lower(), possible_names, n=1, cutoff=0.4)
+                if match:
+                    target_name = match[0].title()
+                    college_info = next(c for c in COLLEGES if c["name"].lower() == match[0])
+
+            # 2️⃣ Use memory if available
+            if memory.get("college_info"):
+                college_info = memory["college_info"]
+                target_name = memory["college_name"]
+
+            # 3️⃣ Build prompt
+            if college_info:
+                context = format_college_info(college_info)
+                prompt = (
+                    f"Generate a rich, descriptive, and fact-based overview about {target_name}. "
+                    f"Base your answer only on the verified dataset info below but make it conversational. "
+                    f"Include academics, campus life, infrastructure, and placement highlights.\n\n"
+                    f"{context}"
+                )
+            else:
+                # No dataset info — allow free factual generation
+                prompt = (
+                    f"The user asked for more information about {user_text}. "
+                    f"Generate a natural, factual explanation based on your general knowledge. "
+                    f"Keep it clear, professional, and relevant — no unrelated dataset references."
+                )
+
+            log_ollama_prompt(prompt, PRIMARY_MODEL, "ollama-dataset-or-free")
             reply = ollama_chat(prompt, context=None, model=PRIMARY_MODEL)
-            source = "ollama-dataset-memory"
+            source = "ollama-dataset-or-free"
 
         # Step 1: Greeting
         if not reply and is_greeting(user_text):
@@ -378,52 +406,42 @@ def get_reply():
             else:
                 reply, source = "You already said hi! 😄 How else can I assist you?", "greeting"
 
-        # ---- Step 1.5: Context Expansion for lifestyle/campus queries ----
+        # Step 1.5: Context Expansion (campus/life/infrastructure/hostel/environment/culture)
         if not reply and any(k in user_text.lower() for k in ["campus", "life", "infrastructure", "hostel", "environment", "culture"]):
-    college_name = memory.get("college_name")
-    if college_name and memory.get("college_info"):
-        base_context = format_college_info(memory["college_info"])
-        expansion_prompt = (
-            f"You are a knowledgeable assistant specializing in Indian colleges.\n"
-            f"Based on the verified data below, write a natural, friendly, and detailed paragraph describing "
-            f"the *campus life, student culture, and facilities* of {college_name}. "
-            f"Use the factual data only as a base (location, ranking, placement, courses, etc.) — "
-            f"but you may add realistic, generic details (like hostels, fests, labs, environment) "
-            f"that fit the tone of a real student review. Avoid repeating the same data lines verbatim.\n\n"
-            f"--- Verified Data ---\n{base_context}\n\n"
-            f"--- Output Example ---\n"
-            f"VJTI offers an energetic campus experience with strong academic support, annual tech festivals, "
-            f"modern labs, and active student clubs that foster innovation and creativity. "
-            f"Now write the equivalent for {college_name}."
-        )
-        log_ollama_prompt(expansion_prompt, PRIMARY_MODEL, "ollama-context-expansion")
-        reply = ollama_chat(expansion_prompt, context=None, model=PRIMARY_MODEL)
-        source = "ollama-context-expansion"
+            college_name = memory.get("college_name")
+            if college_name and memory.get("college_info"):
+                base_context = format_college_info(memory["college_info"])
+                expansion_prompt = (
+                    f"Based on the following verified dataset, describe the campus life and facilities of {college_name} "
+                    f"in a rich, factual, and engaging way. Avoid unrelated or speculative details.\n\n"
+                    f"{base_context}"
+                )
+                log_ollama_prompt(expansion_prompt, PRIMARY_MODEL, "ollama-context-expansion")
+                reply = ollama_chat(expansion_prompt, context=None, model=PRIMARY_MODEL)
+                source = "ollama-context-expansion"
 
-        # Step 2: Dataset queries (direct match / compare / top / cutoff)
+        # Step 2: Dataset Queries (direct / compare / top / cutoff)
         if not reply:
             dataset_reply = extract_college_info(user_text, COLLEGES)
             if dataset_reply:
                 reply = dataset_reply
                 source = "dataset"
 
-        # Step 3: RAG retrieval
+        # Step 3: RAG Retrieval
         if not reply:
             contexts = safe_retrieve_context(user_text)
             if contexts:
                 reply = ollama_chat(user_text, "\n".join(contexts), model=PRIMARY_MODEL)
                 source = "rag"
 
-        # Step 4: Ollama fallback (general questions)
+        # Step 4: Ollama Fallback (general or unseen queries)
         if not reply:
-            # Attach context if relevant
             if memory["college_info"] and not is_general_question(user_text):
                 context = format_college_info(memory["college_info"])
             else:
                 context = None
 
             if is_general_question(user_text):
-                # Factual mode to prevent dataset hallucination
                 general_prompt = (
                     f"You are a concise and factual assistant. Answer the following question directly and succinctly. "
                     f"Do not reference unrelated dataset items or invent facts.\n\n"
@@ -445,10 +463,11 @@ def get_reply():
                 reply = get_default_response(intent, intents)
                 source = "nltk"
 
-        # Step 6: Catch-all
+        # Step 6: Catch-all fallback
         if not reply:
             reply, source = "🙏 Sorry, I couldn’t process that. Try rephrasing your question.", "fallback"
 
+        # Log user query + bot response
         log_interaction(user_text, reply, source)
         return jsonify({"reply": reply, "source": source})
 
