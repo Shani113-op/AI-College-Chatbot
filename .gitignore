@@ -1,0 +1,42 @@
+# 🧠 Python & Flask
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+instance/
+*.log
+
+# 🚫 Virtual Environment
+venv/
+ENV/
+env/
+.venv/
+.ENV/
+
+# 🧱 OS / IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 📦 Dependencies
+*.egg-info/
+.eggs/
+
+# 🧰 Temporary & cache files
+*.bak
+*.tmp
+*.swp
+*.swo
+*.log
+.cache/
+logs/
+
+# ⚙️ Build and dist
+build/
+dist/
+
+# 🌐 Misc
+*.sqlite3
+*.ipynb_checkpoints/

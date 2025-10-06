@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>College Chatbot</title>
+  <style>
+    body { font-family: Arial; background: #f6f6f6; display: flex; justify-content: center; padding-top: 30px; }
+    #box { width: 700px; background: #fff; padding: 18px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+    #messages { height: 400px; overflow: auto; border: 1px solid #eee; padding: 10px; border-radius: 6px; }
+    .m { margin: 8px 0; }
+    .user { text-align: right; color: #0a6; }
+    .bot { text-align: left; color: #333; }
+    input { width: 75%; padding: 10px; }
+    button { padding: 10px 12px; }
+  </style>
+</head>
+<body>
+  <div id="box">
+    <h3>College Info Chatbot</h3>
+    <div id="messages"></div>
+    <div style="margin-top:10px">
+      <input id="input" placeholder="Ask: IIT Bombay fees, VJTI placement..." />
+      <button onclick="send()">Send</button>
+    </div>
+  </div>
+
+  <script>
+    async function send(){
+      const text = document.getElementById('input').value.trim();
+      if(!text) return;
+      const messages = document.getElementById('messages');
+      messages.innerHTML += `<div class="m user"><b>You:</b> ${text}</div>`;
+      document.getElementById('input').value = '';
+      messages.scrollTop = messages.scrollHeight;
+
+      const res = await fetch('/get', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({message: text})
+      });
+      const data = await res.json();
+      messages.innerHTML += `<div class="m bot"><b>Bot:</b> ${data.reply}</div>`;
+      messages.scrollTop = messages.scrollHeight;
+    }
+  </script>
+</body>
+</html>
