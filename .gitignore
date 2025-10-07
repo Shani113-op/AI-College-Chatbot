@@ -29,7 +29,6 @@ Thumbs.db
 *.tmp
 *.swp
 *.swo
-*.log
 .cache/
 logs/
 
@@ -40,3 +39,17 @@ dist/
 # 🌐 Misc
 *.sqlite3
 *.ipynb_checkpoints/
+
+# 🧩 Project-specific (Flask Chatbot)
+memory.json
+chatbot.log
+*.pkl
+*.json
+data/
+models/
+logs/
+__pycache__/
+handlers/__pycache__/
+utils/__pycache__/
+scripts/__pycache__/
+college_db/
