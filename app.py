@@ -708,20 +708,32 @@ def external_chat():
         if not user_message:
             return jsonify({"reply": "⚠️ Please enter a valid message."}), 400
 
-        # Reuse your existing internal logic from get_reply()
-        # but only need the text-based response
-        reply_data = get_reply()  # ⚙️ reuse your main chatbot function
+        # ✅ Use the same logic as your web UI
+        # Reuse your main chatbot logic directly
+        # (the same code that handles static + Ollama)
+        # Pass 'user_message' so it can be processed correctly
 
-        # If get_reply() returns a Flask Response object, extract JSON
+        # You probably have something like this inside get_reply()
+        # so let's simulate what your '/get' route does:
+        from flask import request as flask_request
+        flask_request.args = {"msg": user_message}
+        reply_data = get_reply()
+
+        # ✅ Handle Flask response objects
         if hasattr(reply_data, "get_json"):
             return jsonify(reply_data.get_json())
 
-        # Otherwise, just return whatever reply we got
-        return jsonify(reply_data)
+        # ✅ If Ollama or static logic returns a dict
+        if isinstance(reply_data, dict):
+            return jsonify(reply_data)
+
+        # ✅ Otherwise, just return a text reply
+        return jsonify({"reply": str(reply_data)})
 
     except Exception as e:
         print(f"❌ Error in /chat: {e}")
         return jsonify({"reply": "⚠️ Server error while processing your message."}), 500
+
 
 
 if __name__ == "__main__":
