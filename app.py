@@ -11,8 +11,12 @@ from handlers.ollama import ollama_chat
 from handlers.nlp import classify_intent, get_default_response
 from handlers.rag_handler import safe_retrieve_context
 from utils.logger import log_interaction, read_chat_context
-from utils.memory_helper import load_memory, save_memory
-
+from helpers.college_recommendation import get_college_recommendations
+from utils.memory_helper import (
+    get_user_memory,
+    save_memory,
+    update_last_seen
+)
 
 
 # ---- Config ----
@@ -25,18 +29,56 @@ FALLBACK_MODEL = "phi"
 CONFIDENCE_THRESHOLD = 0.65
 
 # ============================================================
+# 🧠 MEMORY INITIALIZATION AND HELPERS
+# ============================================================
+
+def load_memory(file_path="memory.json"):
+    """Safely load or initialize persistent chatbot memory."""
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # basic validation
+                if isinstance(data, dict):
+                    return data
+        except json.JSONDecodeError:
+            print("⚠ memory.json was corrupted. Reinitializing...")
+
+    # If file not found or corrupted, create default structure
+    default_memory = {
+        "user_name": None,
+        "college_name": None,
+        "college_info": None,
+        "conversation_history": []
+    }
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(default_memory, f, indent=2)
+    return default_memory
+
+
+def save_memory(memory_data, file_path="memory.json"):
+    """Persist chatbot memory safely to disk."""
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(memory_data, f, indent=2)
+    except Exception as e:
+        print(f"⚠ Could not save memory.json: {e}")
+
+
+# ============================================================
 # 🧠 AUTO-INITIALIZE GLOBAL MEMORY ON STARTUP
 # ============================================================
 try:
     memory = load_memory()
-    # ensure base structure exists
     memory.setdefault("user_name", None)
     memory.setdefault("college_name", None)
     memory.setdefault("college_info", None)
+    memory.setdefault("conversation_history", [])
     save_memory(memory)
     print("✅ memory.json initialized successfully.")
 except Exception as e:
     print(f"⚠ Could not initialize memory.json: {e}")
+
 
 # ---- Load classifier ----
 with open(MODEL_PATH, "rb") as f:
@@ -49,6 +91,8 @@ with open(INTENTS_PATH, "r", encoding="utf-8") as f:
 # ---- Load static dataset ----
 with open(COLLEGES_PATH, "r", encoding="utf-8") as f:
     COLLEGES = json.load(f)
+
+
 
 app = Flask(__name__)
 
@@ -404,8 +448,15 @@ def get_reply():
 
     try:
         text_lower = user_text.lower()
-        memory = load_memory()  # ✅ Load from memory.json
-        user_name = memory.get("user_name")
+        reply, source = get_college_recommendations(user_text, COLLEGES)
+        log_interaction(user_text, reply, source)
+
+        # 🧠 Multi-user persistent memory integration
+        username = request.json.get("username", "Guest").capitalize()
+        memory, user_data = get_user_memory(username)
+        user_name = user_data.get("user_name")
+        days_diff = update_last_seen(user_data)
+
 
         # ============================================================
         # 🧩 Load recent chat context from chatbot.log
@@ -430,7 +481,6 @@ def get_reply():
                     user_bot_pairs.appendleft((user.strip(), bot.strip()))
                     user, bot = None, None
 
-            # Build conversation string
             conversation = ""
             for u, b in user_bot_pairs:
                 conversation += f"User: {u}\nAssistant: {b}\n"
@@ -441,13 +491,26 @@ def get_reply():
         # ============================================================
         # 🧠 STEP 0: Greeting Priority — handled first
         # ============================================================
-        if is_greeting(text_lower):
-            if user_name:
-                reply = f"Hi again, {user_name} 👋 How are you today?"
+        if is_greeting(text_lower) and "my name is" not in text_lower:
+            if not user_name or user_name.lower() == "guest":
+                reply = (
+                    "Hi there! 👋 I'm your **Career and College Guide Assistant**. "
+                    "I'm here to help you explore colleges, courses, and career paths. "
+                    "What's your name? 😊"
+                )
             else:
-                reply = "Hi there! 👋 I'm your career and college guide assistant. What's your name?"
+                if days_diff is not None and days_diff > 0:
+                    reply = f"Welcome back after {days_diff} day(s), {user_name}! 👋 How have you been?"
+                else:
+                    reply = f"Hi again, {user_name} 👋 How are you today?"
             source = "greeting"
 
+            user_data["conversation_history"].append(f"User: {user_text}")
+            user_data["conversation_history"].append(f"Bot: {reply}")
+            if len(user_data["conversation_history"]) > 10:
+                user_data["conversation_history"] = user_data["conversation_history"][-10:]
+
+            save_memory(memory)
             log_interaction(user_text, reply, source)
             return jsonify({"reply": reply, "source": source})
 
@@ -457,19 +520,27 @@ def get_reply():
         if "my name is" in text_lower:
             match = re.search(r"my name is\s+([A-Za-z]+)", text_lower)
             if match:
-                user_name = match.group(1).capitalize()
-                memory["user_name"] = user_name
-                save_memory(memory)  # ✅ persist globally
-                reply = f"Nice to meet you, {user_name}! 😊 How can I help you today? Are you exploring courses or colleges?"
+                new_name = match.group(1).capitalize()
+                if username != new_name:
+                    memory[new_name] = memory.pop(username, {})
+                    username = new_name
+                user_data["user_name"] = new_name
+                reply = f"Nice to meet you, {new_name}! 😊 How can I help you today?"
             else:
                 reply = "Nice to meet you! 😊 Could you tell me your name again?"
             source = "personal-intro"
 
+            user_data["conversation_history"].append(f"User: {user_text}")
+            user_data["conversation_history"].append(f"Bot: {reply}")
+            if len(user_data["conversation_history"]) > 10:
+                user_data["conversation_history"] = user_data["conversation_history"][-10:]
+
+            save_memory(memory)
             log_interaction(user_text, reply, source)
             return jsonify({"reply": reply, "source": source})
 
         # ============================================================
-        # 🧠 STEP 2: “What is my name?” — factual recall only
+        # 🧠 STEP 2: “What is my name?”
         # ============================================================
         elif any(q in text_lower for q in ["what is my name", "tell me my name", "do you know my name", "my name?"]):
             if user_name:
@@ -478,6 +549,9 @@ def get_reply():
                 reply = "I don’t think you’ve told me your name yet — what’s your name?"
             source = "personal-memory"
 
+            user_data["conversation_history"].append(f"User: {user_text}")
+            user_data["conversation_history"].append(f"Bot: {reply}")
+            save_memory(memory)
             log_interaction(user_text, reply, source)
             return jsonify({"reply": reply, "source": source})
 
@@ -500,101 +574,111 @@ def get_reply():
             source = "ollama-human"
 
         # ============================================================
-        # 🎓 STEP 4: Course or career guidance queries
+        # 🎓 STEP 4: Smart Dataset Query (Location + Course + %)
         # ============================================================
-        elif any(q in text_lower for q in [
-            "which course", "what course", "suggest course", "choose course",
-            "career advice", "recommend course", "guide me", "find college", "search college"
-        ]):
-            convo_prompt = (
-                f"Recent chat:\n{chat_context}\n\n"
-                f"User: '{user_text}'\n\n"
-                f"You are a smart career counselor AI. Ask about their interests if unclear, "
-                f"and guide them towards the right field (engineering, management, design, etc). "
-                f"Once they are specific, you may suggest exploring dataset-based college options."
-            )
-            log_ollama_prompt(convo_prompt, PRIMARY_MODEL, "ollama-guidance")
-            reply = ollama_chat(convo_prompt, context=None, model=PRIMARY_MODEL)
-            source = "ollama-guidance"
+        if not reply:
+            user_lower = user_text.lower()
+            location = None
 
-        # ============================================================
-        # 🧍 STEP 5: Personal / identity queries
-        # ============================================================
-        elif any(p in text_lower for p in [
-            "who am i", "do you know me", "about me", "remember me",
-            "call me", "know about me"
-        ]):
-            convo_prompt = (
-                f"Recent chat:\n{chat_context}\n\n"
-                f"The user said: '{user_text}'.\n\n"
-                f"Respond warmly, as a human-like AI, and clarify that you don't store private memory. "
-                f"Do not mention colleges or datasets. Stay natural and empathetic."
-            )
-            log_ollama_prompt(convo_prompt, PRIMARY_MODEL, "ollama-personal")
-            reply = ollama_chat(convo_prompt, context=None, model=PRIMARY_MODEL)
-            source = "ollama-personal"
+            location_keywords = {
+                "maharashtra": [
+                    "mumbai", "pune", "nagpur", "nashik", "aurangabad", "kolhapur", "solapur",
+                    "sangli", "nanded", "amravati", "latur", "jalgaon", "akola", "chandrapur",
+                    "ahmednagar", "ratnagiri", "satara", "wardha", "parbhani", "beed",
+                    "buldhana", "hingoli", "osmanabad", "palghar", "thane", "raigad", "gondia",
+                    "washim", "yavatmal", "gadchiroli", "dhule", "nagar"
+                ],
+                "delhi": ["new delhi", "delhi"],
+                "karnataka": ["bangalore", "mangalore", "mysore", "belgaum", "hubli"],
+                "tamil nadu": ["chennai", "coimbatore", "madurai", "trichy", "salem"],
+                "telangana": ["hyderabad", "warangal", "nizamabad"],
+                "gujarat": ["ahmedabad", "surat", "vadodara", "rajkot"],
+                "uttar pradesh": ["lucknow", "noida", "ghaziabad", "kanpur", "agra"],
+                "rajasthan": ["jaipur", "udaipur", "jodhpur", "kota"]
+            }
 
-        # ============================================================
-        # 🏫 STEP 6: College info expansion
-        # ============================================================
-        elif any(v in text_lower for v in vague_queries):
-            target_name = None
-            possible_names = [c["name"].lower() for c in COLLEGES]
-            match = get_close_matches(text_lower, possible_names, n=1, cutoff=0.4)
-            if match:
-                target_name = match[0].title()
-                college_info = next(c for c in COLLEGES if c["name"].lower() == match[0])
-                context = format_college_info(college_info)
-                prompt = (
-                    f"Chat context:\n{chat_context}\n\n"
-                    f"Generate a descriptive, factual overview about {target_name}. "
-                    f"Use verified dataset info only. Include academics, campus, and placements.\n\n{context}"
+            for region, cities in location_keywords.items():
+                if region in user_lower:
+                    location = region
+                    break
+                for city in cities:
+                    if city in user_lower:
+                        location = city
+                        break
+                if location:
+                    break
+
+            perc_match = re.search(r"(\d{2,3})\s*%|(\d{2,3})\s*percent", user_lower)
+            percentage = int(perc_match.group(1) or perc_match.group(2)) if perc_match else None
+
+            course = None
+            for field in ["btech", "engineering", "mba", "management", "mca", "bsc", "msc"]:
+                if field in user_lower:
+                    course = field.upper()
+                    break
+
+            filtered = COLLEGES
+            if location:
+                filtered = [c for c in filtered if location.lower() in c.get("location", "").lower()]
+            if course:
+                filtered = [c for c in filtered if course.lower() in c.get("course", "").lower()]
+
+            if filtered and percentage and any("cutoff" in str(c).lower() for c in filtered):
+                eligible = []
+                for c in filtered:
+                    cutoffs = c.get("cutOffs", {})
+                    if cutoffs:
+                        for branch, cutoff in cutoffs.items():
+                            try:
+                                cutoff_value = float(str(cutoff).replace("%", "").strip())
+                                if percentage >= cutoff_value - 5:
+                                    eligible.append(c)
+                                    break
+                            except ValueError:
+                                continue
+                filtered = eligible or filtered
+
+            if filtered:
+                top_results = filtered[:5]
+                lines = []
+                for i, c in enumerate(top_results, 1):
+                    recruiters = ", ".join(c.get("topRecruiters", [])[:3]) or "N/A"
+                    lines.append(
+                        f"{i}. 🏫 {c['name']} — {c.get('location','N/A')} "
+                        f"(Rank: {c.get('ranking','N/A')}, Course: {c.get('course','N/A')}, "
+                        f"Placement: {c.get('placementRate','N/A')}, Fees: {c.get('fees','N/A')})"
+                    )
+
+                location_part = f"in {location.title()}" if location else ""
+                course_part = f"for {course}" if course else "based on your interests"
+                perc_part = f"with your {percentage}% score" if percentage else ""
+                reply = (
+                    f"Here are some good colleges {location_part} {course_part} {perc_part}:\n\n"
+                    + "\n".join(lines)
+                    + "\n\nWould you like to see more colleges or check placements for any specific one?"
                 )
-                log_ollama_prompt(prompt, PRIMARY_MODEL, "ollama-dataset")
-                reply = ollama_chat(prompt, context=None, model=PRIMARY_MODEL)
-                source = "ollama-dataset"
+                source = "smart-dataset"
+            else:
+                convo_prompt = (
+                    f"The user said: '{user_text}'.\n"
+                    f"You are a polite and knowledgeable **career counseling assistant** that helps with "
+                    f"college admissions, entrance exams, and courses in India. "
+                    f"Only discuss relevant details like colleges, exams, eligibility, cutoffs, and placements. "
+                    f"If the question is outside this domain (like riddles, logic, or math puzzles), "
+                    f"politely redirect the user back to career or college-related topics.\n\n"
+                    f"Example helpful style:\n"
+                    f"- If user asks about JEE percentile, talk about colleges that accept it.\n"
+                    f"- If user mentions MHT-CET, explain cutoffs.\n"
+                    f"- If question is unrelated, respond like: "
+                    f"'I specialize in career and college guidance 😊 Would you like me to suggest some colleges based on your marks?'\n\n"
+                    f"Now respond naturally and concisely to this user query."
+                )
+                log_ollama_prompt(convo_prompt, PRIMARY_MODEL, "ollama-fallback")
+                reply = ollama_chat(convo_prompt, context=None, model=PRIMARY_MODEL)
+                source = "ollama-fallback"
 
         # ============================================================
-        # 🧠 STEP 7: Dataset query (fees, cutoff, placements)
-        # ============================================================
-        if not reply:
-            dataset_reply = extract_college_info(user_text, COLLEGES)
-            if dataset_reply:
-                reply = dataset_reply
-                source = "dataset"
-
-        # ============================================================
-        # 🔍 STEP 8: RAG-based contextual retrieval
-        # ============================================================
-        if not reply:
-            contexts = safe_retrieve_context(user_text)
-            if contexts:
-                rag_context = f"{chat_context}\n\n{'\n'.join(contexts)}"
-                reply = ollama_chat(user_text, context=rag_context, model=PRIMARY_MODEL)
-                source = "rag"
-
-        # ============================================================
-        # 🤖 STEP 9: General Ollama fallback
-        # ============================================================
-        if not reply:
-            general_prompt = (
-                f"Here is the recent chat history:\n{chat_context}\n\n"
-                f"The user now said: '{user_text}'.\n\n"
-                f"Respond clearly, concisely, and helpfully, maintaining tone continuity from chat history."
-            )
-            log_ollama_prompt(general_prompt, PRIMARY_MODEL, "ollama-general")
-            reply = ollama_chat(general_prompt, context=None, model=PRIMARY_MODEL)
-            source = "ollama-general"
-
-        # ============================================================
-        # 🛟 STEP 10: Final Fallback
-        # ============================================================
-        if not reply:
-            reply = "🙏 Sorry, I couldn’t process that. Could you rephrase your question?"
-            source = "fallback"
-
-        # ============================================================
-        # ✅ Log and Save Chat
+        # ✅ Save and Return
         # ============================================================
         save_memory(memory)
         log_interaction(user_text, reply, source)
@@ -608,6 +692,39 @@ def get_reply():
         }), 500
 
 
+# ============================================================
+# ✅ API endpoint for external chat clients (like React frontend)
+# ============================================================
+from flask_cors import CORS
+CORS(app)
+
+@app.route("/chat", methods=["POST"])
+def external_chat():
+    """External JSON-based chat endpoint for React frontend."""
+    try:
+        data = request.get_json()
+        user_message = (data.get("message") or "").strip()
+
+        if not user_message:
+            return jsonify({"reply": "⚠️ Please enter a valid message."}), 400
+
+        # Reuse your existing internal logic from get_reply()
+        # but only need the text-based response
+        reply_data = get_reply()  # ⚙️ reuse your main chatbot function
+
+        # If get_reply() returns a Flask Response object, extract JSON
+        if hasattr(reply_data, "get_json"):
+            return jsonify(reply_data.get_json())
+
+        # Otherwise, just return whatever reply we got
+        return jsonify(reply_data)
+
+    except Exception as e:
+        print(f"❌ Error in /chat: {e}")
+        return jsonify({"reply": "⚠️ Server error while processing your message."}), 500
+
+
 if __name__ == "__main__":
-    # use_reloader=False helps avoid sporadic WinError 10038 on Windows debug reloads
     app.run(debug=True, use_reloader=False)
+
+

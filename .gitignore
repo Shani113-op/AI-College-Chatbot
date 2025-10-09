@@ -43,13 +43,21 @@ dist/
 # 🧩 Project-specific (Flask Chatbot)
 memory.json
 chatbot.log
-*.pkl
 *.json
 data/
-models/
 logs/
 __pycache__/
 handlers/__pycache__/
 utils/__pycache__/
 scripts/__pycache__/
 college_db/
+
+# 🚀 Allow model for Render deployment
+!models/
+!models/classifier.pkl
+
+# 🚀 Allow essential data files for Render
+!intents/
+!intents/intents_examples.json
+!data/
+!data/staticColleges.json
